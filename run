@@ -1,0 +1,262 @@
+#!/bin/bash
+
+# Alpha warning
+echo "WARNING: JustHideMe Bootstrap is alpha! It may not work as desired."
+read -p "Type 'okay' to continue: " okay
+case "${okay}" in
+    okay ) echo "Very well then...";;
+    * ) echo "We're done here." ; exit 1 ;;
+esac
+
+PREFER_HYPER=1
+INSTALL_MISSING_DOCKER=1
+
+CONTAINER_NAME="ephemeral-vpn"
+VPN_IMAGE="justhidme/ephemeral-vpn:latest"
+
+TMP_FILE=/tmp/justhideme.$$.log
+
+cleanup () {
+    debug Cleaning up
+    if [ -f $TMP_FILE ]; then
+        rm $TMP_FILE >/dev/null 2>&1
+    fi
+}
+
+fail () {
+    echo $@
+    cleanup
+
+    debug Goodbye
+    exit 1
+}
+
+# Determine the local operating system, relying on bash's
+# built-in OSTYPE variable. This should work on anything
+# modern enough for us to care about.
+#
+case "$OSTYPE" in
+    darwin*)
+        DISTRIB="osx"
+        ;; 
+
+    linux*)
+        # Partially ripped off from:  http://www.unix.com/302211858-post6.html
+
+        if [ -r /etc/lsb-release ]; then
+            DISTRIB=$(grep 'DISTRIB_ID' /etc/lsb-release | sed 's/DISTRIB_ID=//' | head -1)
+        fi
+        if [[ -z "$DISTRIB" ]]; then
+            DISTRIB=$(find /etc/ -maxdepth 1 -name '*release' 2> /dev/null | sed 's/\/etc\///' | sed 's/-release//' | head -1)
+        fi
+        if [[ -z "$DISTRIB" ]]; then
+            DISTRIB=$(find /etc/ -maxdepth 1 -name '*version' 2> /dev/null | sed 's/\/etc\///' | sed 's/-version//' | head -1)
+        fi
+        if [[ -z "$DISTRIB" ]]; then
+            fail "Undeterminable Linux Distro"
+        fi
+
+        DISTRIB=$(echo $DISTRIB | tr A-Z a-z)
+        case $DISTRIB in
+            arch)
+                ;;
+            debian)
+                ;;
+            fedora)
+                ;;
+            ubuntu)
+                ;;
+            *)
+                fail "Unsupported Linux Distro"
+                ;;
+        esac
+
+        if [[ $(whoami) == "root" ]]; then
+            CAN_INSTALL=1
+        fi
+        ;;
+
+    bsd*)
+        echo "BSD" ;;
+
+    *)
+        fail "Unsupported OS"
+        ;;
+esac
+
+debug () {
+    if [ ! -z ${DEBUG+x} ]; then
+        echo DBG: $@
+    fi
+}
+
+
+while getopts ":di:nV" opt; do
+    case $opt in
+        d)
+            DEBUG=1
+            ;;
+        i)
+            VPN_IMAGE="${OPTARG}"
+            ;;
+        n)
+            DO_NOT=1
+            ;;
+        V)
+            $ECHO "-V version info"
+            ;;
+        \?) 
+            fail "Unknown arg: -$OPTARG"
+            ;;
+        esac
+done
+
+
+check_driver () {
+    driver=$1
+    debug Checking for usable $driver
+
+    # TODO: this is pretty weak
+    if [[ ! -z $(which $driver) ]]; then
+        driver_version=$($driver version | grep Client -A 1 | grep Version | cut -d: -f2 | tr -d '[[:space:]]')
+        if [ ! -z ${driver_version+x} ]; then
+            debug Usable $driver detected: $driver_version
+            DRIVER=$driver
+        fi
+    fi
+}
+
+# Is hyper available?
+if [ ! -z ${PREFER_HYPER+x} ]; then
+    check_driver hyper
+fi
+
+# Is docker available?
+if [ -z ${DRIVER+x} ]; then
+    check_driver docker
+fi
+
+# Do we have a driver?
+if [ -z ${DRIVER+x} ]; then
+
+    if [ ! -z ${CAN_INSTALL+x} ]; then
+        if [ ! -z ${PACKAGE_MANAGER} ]; then
+            debug Attempt to install docker
+
+            # TODO
+            check_driver docker
+        fi
+    fi
+
+    if [ -z ${DRIVER+x} ]; then
+        fail "No usable container driver"
+    fi
+fi
+
+
+if [ ! -z ${DO_NOT+x} ]; then
+    DRIVER="echo"
+fi
+
+
+find_docker_errors () {
+    ERROR=$(grep -m 1 -i error $TMP_FILE)
+    case $ERROR in
+        *"already allocated"*)
+            echo "A necessary resource is unavailable:"
+            echo "vvvvv $DRIVER Error Below vvvvv"
+            echo $ERROR
+            echo "^^^^^ $DRIVER Error Above ^^^^^"
+            ;;
+        *)
+            echo "vvvvv $DRIVER Error Below vvvvv"
+            cat $TMP_FILE
+            echo "^^^^^ $DRIVER Error Above ^^^^^"
+            ;;
+    esac
+}
+
+find_vpn_container () {
+    debug Checking for a container with my name
+    $DRIVER inspect $CONTAINER_NAME >$TMP_FILE 2>&1
+    if [[ $? -eq 0 ]]; then
+        KNOWN_CONTAINER=$(grep -m 1 '"Id"' $TMP_FILE | cut -d\" -f 4)
+        if [[ $(grep -m 1 '"Running"' $TMP_FILE | cut -d: -f2 | tr -cd '[:alpha:]') == "true" ]]; then
+            KNOWN_CONTAINER_RUNNING=1
+        else
+            # Hacky, but good enough
+            KNOWN_CONTAINER_ERROR=$(grep -m 1 '"Error"' $TMP_FILE | cut -d\" -f 4)
+        fi
+    fi
+}
+
+delete_vpn_container () {
+    debug Deleting VPN container by name
+    $DRIVER rm -f -v $CONTAINER_NAME >$TMP_FILE 2>&1
+    # TODO: better analysis
+    if [[ $? -ne 0 ]]; then
+        find_docker_errors
+        fail "Unable to delete VPN"
+    fi
+}
+
+start_vpn_container () {
+    debug Starting VPN container
+    $DRIVER run -dit --name $CONTAINER_NAME --cap-add=NET_ADMIN -p 1194:1194/udp -p 443:443 $VPN_IMAGE >$TMP_FILE 2>&1
+    # TODO: better analysis
+    if [[ $? -ne 0 ]]; then
+        find_docker_errors
+        fail "Unable to start VPN"
+    fi
+}
+
+# Check to see if the VPN container is running
+find_vpn_container
+if [[ ! -z ${KNOWN_CONTAINER} ]]; then
+    debug A container with our name exists
+
+    if [[ -z ${KNOWN_CONTAINER_RUNNING} ]]; then
+        debug ...but it is not running
+        delete_vpn_container
+        start_vpn_container
+    else
+        debug ...and it is running so I will ignore it
+    fi
+else
+    start_vpn_container
+fi
+
+
+if [ -z ${DO_WEB+x} ]; then
+    debug Just print the credentials
+    $DRIVER exec -it $CONTAINER_NAME "/get.sh"
+
+else
+    debug Start the webserver
+
+    $DRIVER exec -it ephemeral-vpn "/web.sh"
+    cat <<EOF
+
+*************************************************************************
+  Time's up.
+*************************************************************************
+The config download service has been shut down. The VPN itself will
+remain active until the host VM is destroyed.
+
+Re-run the same "curl ... | bash" command if you need to download your
+client config file again.
+
+EOF
+fi
+
+# Exit message
+cat <<EOF
+
+Thanks for trusting your privacy needs to JustHideMe, and don't forget
+to destroy the host VM when you're done.
+EOF
+
+cleanup
+exit 0
+
+# vim: ts=4:sw=4:sts=4:et:
