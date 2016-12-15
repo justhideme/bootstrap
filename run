@@ -8,13 +8,12 @@ case "${okay}" in
     * ) echo "We're done here." ; exit 1 ;;
 esac
 
-PREFER_HYPER=1
-INSTALL_MISSING_DOCKER=1
 
 CONTAINER_NAME="ephemeral-vpn"
 VPN_IMAGE="justhidme/ephemeral-vpn:latest"
 
 TMP_FILE=/tmp/justhideme.$$.log
+
 
 cleanup () {
     debug Cleaning up
@@ -23,6 +22,7 @@ cleanup () {
     fi
 }
 
+
 fail () {
     echo $@
     cleanup
@@ -30,6 +30,7 @@ fail () {
     debug Goodbye
     exit 1
 }
+
 
 # Determine the local operating system, relying on bash's
 # built-in OSTYPE variable. This should work on anything
@@ -84,6 +85,7 @@ case "$OSTYPE" in
         ;;
 esac
 
+
 debug () {
     if [ ! -z ${DEBUG+x} ]; then
         echo DBG: $@
@@ -126,40 +128,24 @@ check_driver () {
     fi
 }
 
-# Is hyper available?
-if [ ! -z ${PREFER_HYPER+x} ]; then
-    check_driver hyper
-fi
 
 # Is docker available?
-if [ -z ${DRIVER+x} ]; then
-    check_driver docker
-fi
+check_driver docker
+
 
 # Do we have a driver?
 if [ -z ${DRIVER+x} ]; then
-
-    if [ ! -z ${CAN_INSTALL+x} ]; then
-        if [ ! -z ${PACKAGE_MANAGER} ]; then
-            debug Attempt to install docker
-
-            # TODO
-            check_driver docker
-        fi
-    fi
-
-    if [ -z ${DRIVER+x} ]; then
-        fail "No usable container driver"
-    fi
+    fail "No usable container driver"
 fi
 
 
 if [ ! -z ${DO_NOT+x} ]; then
-    DRIVER="echo"
+    DRIVER="echo ${DRIVER}"
 fi
 
 
-find_docker_errors () {
+# Try to be helpful
+find_driver_errors () {
     ERROR=$(grep -m 1 -i error $TMP_FILE)
     case $ERROR in
         *"already allocated"*)
@@ -176,6 +162,7 @@ find_docker_errors () {
     esac
 }
 
+
 find_vpn_container () {
     debug Checking for a container with my name
     $DRIVER inspect $CONTAINER_NAME >$TMP_FILE 2>&1
@@ -190,25 +177,44 @@ find_vpn_container () {
     fi
 }
 
+
 delete_vpn_container () {
     debug Deleting VPN container by name
     $DRIVER rm -f -v $CONTAINER_NAME >$TMP_FILE 2>&1
     # TODO: better analysis
     if [[ $? -ne 0 ]]; then
-        find_docker_errors
+        find_driver_errors
         fail "Unable to delete VPN"
     fi
 }
+
 
 start_vpn_container () {
     debug Starting VPN container
     $DRIVER run -dit --name $CONTAINER_NAME --cap-add=NET_ADMIN -p 1194:1194/udp -p 443:443 $VPN_IMAGE >$TMP_FILE 2>&1
     # TODO: better analysis
     if [[ $? -ne 0 ]]; then
-        find_docker_errors
+        find_driver_errors
         fail "Unable to start VPN"
     fi
+    start_vpn_watchdog
 }
+
+
+# Create a process to fork off that will make sure the container
+# is destroyed when it exits... necessary because Docker _still_
+# doesn't correctly support `-d` in together with `--rm`.
+start_vpn_watchdog() {
+    WATCHDOG=/tmp/${CONTAINER_NAME}_wd.sh
+    cat >${WATCHDOG} <<EOF
+#!/bin/sh
+${DRIVER} wait ${CONTAINER_NAME}
+${DRIVER} rm -f ${CONTAINER_NAME}
+EOF
+    chmod 500 ${WATCHDOG}
+    nohup ${WATCHDOG} >/dev/null 2>&1 &
+}
+
 
 # Check to see if the VPN container is running
 find_vpn_container
@@ -227,34 +233,8 @@ else
 fi
 
 
-if [ -z ${DO_WEB+x} ]; then
-    debug Just print the credentials
-    $DRIVER exec -it $CONTAINER_NAME "/get.sh"
-
-else
-    debug Start the webserver
-
-    $DRIVER exec -it ephemeral-vpn "/web.sh"
-    cat <<EOF
-
-*************************************************************************
-  Time's up.
-*************************************************************************
-The config download service has been shut down. The VPN itself will
-remain active until the host VM is destroyed.
-
-Re-run the same "curl ... | bash" command if you need to download your
-client config file again.
-
-EOF
-fi
-
-# Exit message
-cat <<EOF
-
-Thanks for trusting your privacy needs to JustHideMe, and don't forget
-to destroy the host VM when you're done.
-EOF
+# Finally, launch the client config fetcher
+$DRIVER exec -it $CONTAINER_NAME "/get_config.sh"
 
 cleanup
 exit 0
