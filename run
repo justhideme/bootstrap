@@ -10,7 +10,7 @@ esac
 
 
 CONTAINER_NAME="ephemeral-vpn"
-VPN_IMAGE="justhidme/ephemeral-vpn:latest"
+VPN_IMAGE="justhideme/ephemeral-vpn:latest"
 
 TMP_FILE=/tmp/justhideme.$$.log
 
@@ -205,14 +205,7 @@ start_vpn_container () {
 # is destroyed when it exits... necessary because Docker _still_
 # doesn't correctly support `-d` in together with `--rm`.
 start_vpn_watchdog() {
-    WATCHDOG=/tmp/${CONTAINER_NAME}_wd.sh
-    cat >${WATCHDOG} <<EOF
-#!/bin/sh
-${DRIVER} wait ${CONTAINER_NAME}
-${DRIVER} rm -f ${CONTAINER_NAME}
-EOF
-    chmod 500 ${WATCHDOG}
-    nohup ${WATCHDOG} >/dev/null 2>&1 &
+    nohup sh -c "${DRIVER} wait ${CONTAINER_NAME} ; ${DRIVER} rm -f ${CONTAINER_NAME}" > /dev/null 2>&1 &
 }
 
 
